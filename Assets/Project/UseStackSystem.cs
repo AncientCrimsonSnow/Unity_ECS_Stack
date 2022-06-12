@@ -2,13 +2,14 @@
 using Unity.Collections;
 using Unity.Entities;
 using UnityEngine;
+using static Project.Extensions;
 
 namespace Project
 {
     [AlwaysUpdateSystem]
     public partial class UseStackSystem : SystemBase
     {
-        private const int StackSize = 20;
+        private const int StackSize = 10;
         private const int MaxEntitiesPerChunk = 2040;
 
         private EndSimulationEntityCommandBufferSystem _ecbs;
@@ -16,17 +17,39 @@ namespace Project
         
         private readonly ECS_Stack _stack = new ECS_Stack();
         private IEnumerator _textStack;
+        private EntityQuery _nodeDataQuery;
 
         protected override void OnCreate()
         {
             _ecbs = World.GetOrCreateSystem<EndSimulationEntityCommandBufferSystem>();
 
             _textStack = TestStack().GetEnumerator();
+            
+            _nodeDataQuery = GetEntityQuery(ComponentType.ReadOnly<NodeData>());
         }
 
         protected override void OnUpdate()
         {
+            _ecb = _ecbs.CreateCommandBuffer().AsParallelWriter();
             _textStack.MoveNext();
+        }
+        
+        private IEnumerable TestStack()
+        {
+            FillStack();
+            yield return null;
+            PrintStack();
+            SelectEntitiesForHead();
+            yield return null;
+            MoveSelectedEntitiesToHead();
+            yield return null;
+            PrintStack();
+            SwitchNodes(new NodeData{index = 3}, new NodeData{index = 4});
+            yield return null;
+            PrintStack();
+            ClearStack();
+            yield return null;
+            PrintStack();
         }
 
         private void FillStack()
@@ -43,19 +66,47 @@ namespace Project
             }
         }
 
-        private void SplitHead()
+        private void SelectEntitiesForHead()
         {
-            var lastNodeData = new NodeData { index = StackSize - 1};
-            
-            var query = GetEntityQuery(ComponentType.ReadOnly<NodeData>());
-            query.SetSharedComponentFilter(_stack.Head);
-            
+            var lastNodeData = new NodeData { index = StackSize - 1 };
             _stack.Push(lastNodeData);
             
+            _nodeDataQuery.ResetFilter();
+            var entities = _nodeDataQuery.ToEntityArray(Allocator.Temp);
+            var indices = new int[entities.Length];
+            for (var i = 0; i != indices.Length; i++)
+                indices[i] = i;
+
+            Shuffle(indices);
+            for (var i = 0; i != MaxEntitiesPerChunk; i++)
+            {
+                _ecb.RemoveComponent<NodeData>(indices[i], entities[indices[i]]);
+                _ecb.AddComponent<MoveToHeadTag>(indices[i], entities[indices[i]]);
+            }
+        }
+
+        private void MoveSelectedEntitiesToHead()
+        {
+            var lastNodeData = new NodeData { index = StackSize - 1 };
+            var query = GetEntityQuery(ComponentType.ReadOnly<MoveToHeadTag>());
             var entities = query.ToEntityArray(Allocator.Temp);
-            for (var i = 0; i != entities.Length / 2; i++)
-                _ecb.SetSharedComponent(i, entities[i], lastNodeData);
-            
+            for (var i = 0; i != entities.Length; i++)
+            {
+                _ecb.RemoveComponent<MoveToHeadTag>(i, entities[i]);
+                _ecb.AddSharedComponent(i, entities[i], lastNodeData);
+            }
+        }
+
+        private void SwitchNodes(NodeData node1, NodeData node2)
+        {
+            var query = GetEntityQuery(ComponentType.ReadOnly<NodeData>());
+            query.SetSharedComponentFilter(node1);
+            var entities1 = query.ToEntityArray(Allocator.Temp);
+            query.SetSharedComponentFilter(node2);
+            var entities2 = query.ToEntityArray(Allocator.Temp);
+
+            _ecb.SetSharedComponent(0, entities1, node2);
+            _ecb.SetSharedComponent(1, entities2, node1);
         }
         
         private void ClearStack()
@@ -72,23 +123,7 @@ namespace Project
                     }).Run();
             }
         }
-
-        private IEnumerable TestStack()
-        {
-            _ecb = _ecbs.CreateCommandBuffer().AsParallelWriter();
-            FillStack();
-            yield return null;
-            PrintStack();
-            _ecb = _ecbs.CreateCommandBuffer().AsParallelWriter();
-            SplitHead();
-            yield return null;
-            PrintStack();
-            _ecb = _ecbs.CreateCommandBuffer().AsParallelWriter();
-            ClearStack();
-            yield return null;
-            PrintStack();
-        }
-
+        
         private void PrintStack()
         {
             var data = _stack.Traverse();
@@ -98,7 +133,6 @@ namespace Project
             {
                 query.SetSharedComponentFilter(nodeData);
                 Debug.Log($"Node with ID = {nodeData.index} has {query.CalculateEntityCount()} Entities");
-                query.ResetFilter();
             }
             Debug.Log("---------------------------------");
         }
